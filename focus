@@ -1,0 +1,191 @@
+#!/usr/bin/env python3.4
+#
+# This file is part of rasa-focusd.
+#
+# rasa-focusd is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# rasa-focusd is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with rasa-focusd.  If not, see <http://www.gnu.org/licenses/>.
+
+"""Commandline client for controlling an Optec Focus Lynx focuser focusd"""
+# pylint: disable=invalid-name
+# pylint: disable=broad-except
+# pylint: disable=unused-argument
+
+import datetime
+import json
+import os
+import sys
+import Pyro4
+from warwick.observatory.common import daemons
+from warwick.rasa.focuser import CommandStatus, FocuserStatus
+
+# Set automatically when generating RPM package
+SOFTWARE_VERSION = 'UNKNOWN'
+
+SCRIPT_NAME = os.path.basename(sys.argv[0])
+sys.excepthook = Pyro4.util.excepthook
+
+FMT_GREEN = u'\033[92m'
+FMT_RED = u'\033[91m'
+FMT_CYAN = u'\033[96m'
+FMT_YELLOW = u'\033[93m'
+FMT_BOLD = u'\033[1m'
+FMT_CLEAR = u'\033[0m'
+
+CHANNELS = [1, 2]
+CHANNELS_ARG_STRING = '1|2'
+
+def run_command(command, args):
+    """Runs a command and prints the message associated with the return code.
+       Returns the return code from the command
+    """
+    try:
+        ret = command(args)
+    except KeyboardInterrupt:
+        ret = -100
+    except Pyro4.errors.CommunicationError:
+        ret = -101
+
+    # Print message associated with error codes, except for -1 (error handled locally)
+    if ret != -1 and ret != 0:
+        print(CommandStatus.message(ret))
+    elif ret != -1 and ret != 0:
+        print('Returned unknown status code: {0}'.format(ret))
+    return ret
+
+def print_status(args):
+    """Prints a human-readable summary of the focuser status"""
+    with daemons.rasa_focus.connect() as focusd:
+        data = focusd.report_status()
+
+    if data is not None:
+        date = datetime.datetime.strptime(data['date'], '%Y-%m-%dT%H:%M:%SZ')
+        print('Data received ' + FMT_BOLD + str(date) + FMT_CLEAR + ':')
+        for i in [0, 1]:
+            channel = data['channels'][i]
+            label = 'Channel {}: '.format(i+1)
+            if channel['status'] < FocuserStatus.Idle:
+                print(label + FocuserStatus.label(channel['status']))
+                continue
+
+            label += FMT_BOLD + (FMT_YELLOW if channel['status'] == FocuserStatus.Moving else '')
+            label += '{:+7d}'.format(channel['current_steps']) + FMT_CLEAR + ' steps'
+            if channel['status'] == FocuserStatus.Moving:
+                label += ' (moving to ' + FMT_BOLD + '{:+7d}'.format(channel['target_steps'])
+                label += FMT_CLEAR + ' steps)'
+
+            label += FMT_BOLD + ', {:.1f}'.format(channel['temperature']) + FMT_CLEAR + '\u00B0C'
+            print(label)
+    return 0
+
+def print_json(args):
+    """Prints a machine-readable summary of the focuser status"""
+    with daemons.rasa_focus.connect() as focusd:
+        print(json.dumps(focusd.report_status() or {}))
+
+    return 0
+
+def set_position(args):
+    """Request a focuser channel to move a specific step position"""
+    try:
+        if len(args) == 2 and int(args[0]) in CHANNELS:
+            channel = int(args[0])
+            position = int(args[1])
+
+            try:
+                with daemons.rasa_focus.connect(timeout=0) as focusd:
+                    return focusd.set_focus(channel, position)
+            except KeyboardInterrupt:
+                # ctrl-c terminates the running command
+                with daemons.rasa_focus.connect() as focusd:
+                    return focusd.stop_channel(channel)
+    except ValueError:
+        pass
+    print('usage: {} set ({}) <step position>'.format(SCRIPT_NAME, CHANNELS_ARG_STRING))
+    return -1
+
+def offset_position(args):
+    """Request a focuser channel to move by a specific step delta"""
+    try:
+        if len(args) == 2 and int(args[0]) in CHANNELS:
+            channel = int(args[0])
+            delta = int(args[1])
+
+            try:
+                with daemons.rasa_focus.connect(timeout=0) as focusd:
+                    return focusd.set_focus(channel, delta, offset=True)
+            except KeyboardInterrupt:
+                # ctrl-c terminates the running command
+                with daemons.rasa_focus.connect() as focusd:
+                    return focusd.stop_channel(channel)
+    except ValueError:
+        pass
+    print('usage: {} offset ({}) <step delta>'.format(SCRIPT_NAME, CHANNELS_ARG_STRING))
+    return -1
+
+def stop(args):
+    """Stop a focuser channel"""
+    try:
+        if len(args) == 1 and int(args[0]) in CHANNELS:
+            with daemons.rasa_focus.connect() as focusd:
+                return focusd.stop_channel(int(args[0]))
+    except ValueError:
+        pass
+
+    print('usage: {} stop ({})'.format(SCRIPT_NAME, CHANNELS_ARG_STRING))
+    return -1
+
+def set_home_position(args):
+    """Sets the current focuser position to the home position"""
+    try:
+        if len(args) == 1 and int(args[0]) in CHANNELS:
+            with daemons.rasa_focus.connect() as focusd:
+                return focusd.reset_home_position(int(args[0]))
+    except ValueError:
+        pass
+
+    print('usage: {} zero ({})'.format(SCRIPT_NAME, CHANNELS_ARG_STRING))
+    return -1
+
+def print_usage():
+    """Prints the utility help"""
+    print('usage: {} <command> [<args>]'.format(SCRIPT_NAME))
+    print()
+    print('general commands:')
+    print('   set          request the focuser to move to a given absolute position')
+    print('   offset       request the focuser to move by a given offset delta')
+    print('   stop         request the focuser to stop moving')
+    print('   status       print a human-readable summary of the focuser status')
+    print('   json         print a machine-readable summary of the focuser status')
+    print('engineering commands:')
+    print('   zero         sets the current focuser position to the home position')
+    print()
+
+    return 0
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        sys.exit(print_usage())
+
+    commands = {
+        'set': set_position,
+        'offset': offset_position,
+        'stop': stop,
+        'status': print_status,
+        'json': print_json,
+        'zero': set_home_position,
+    }
+
+    if sys.argv[1] not in commands:
+        sys.exit(print_usage())
+
+    sys.exit(run_command(commands[sys.argv[1]], sys.argv[2:]))
