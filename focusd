@@ -408,7 +408,8 @@ class FocusLynxDaemon:
 
                         # First query after a restart sets the requested steps
                         # to avoid unnecessary movements
-                        if self._status[i]['status'] == FocuserStatus.Disconnected:
+                        if self._status[i]['status'] == FocuserStatus.Disconnected \
+                                and status[i]['status'] > FocuserStatus.Error:
                             self._request_steps[i] = status[i]['target_steps']
 
                         if self._request_reset_home[i]:
