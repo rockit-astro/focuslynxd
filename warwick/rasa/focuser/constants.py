@@ -64,15 +64,29 @@ class FocuserStatus:
     Disconnected, Error, Idle, Moving = range(4)
 
     _labels = {
-        0: FMT_BOLD + FMT_RED + 'DISCONNECTED' + FMT_CLEAR,
-        1: FMT_BOLD + FMT_RED + 'ERROR' + FMT_CLEAR,
-        2: FMT_BOLD + 'IDLE' + FMT_CLEAR,
-        3: FMT_BOLD + FMT_YELLOW + 'MOVING' + FMT_CLEAR,
+        0: 'DISCONNECTED',
+        1: 'ERROR',
+        2: 'IDLE',
+        3: 'MOVING',
+    }
+
+    _formats = {
+        0: FMT_BOLD + FMT_RED,
+        1: FMT_BOLD,
+        2: FMT_BOLD,
+        3: FMT_BOLD + FMT_YELLOW,
     }
 
     @classmethod
-    def label(cls, status):
-        """Returns a human readable string describing a status"""
-        if status in cls._labels:
-            return cls._labels[status]
-        return FMT_RED + FMT_BOLD + 'UNKNOWN STATUS' + FMT_CLEAR
+    def label(cls, status, formatting=False):
+        """Returns a human readable string describing a status
+           Set formatting=true to enable terminal formatting characters
+        """
+        if formatting:
+            if status in cls._formats and status in cls._formats:
+                return cls._formats[status] + cls._labels[status] + FMT_CLEAR
+            return FMT_RED + FMT_BOLD + 'UNKNOWN' + FMT_CLEAR
+        else:
+            if status in cls._labels:
+                return cls._labels[status]
+            return 'UNKNOWN'

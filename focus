@@ -74,7 +74,7 @@ def print_status(args):
             channel = data['channels'][i]
             label = 'Channel {}: '.format(i+1)
             if channel['status'] < FocuserStatus.Idle:
-                print(label + FocuserStatus.label(channel['status']))
+                print(label + FocuserStatus.label(channel['status'], True))
                 continue
 
             label += FMT_BOLD + (FMT_YELLOW if channel['status'] == FocuserStatus.Moving else '')

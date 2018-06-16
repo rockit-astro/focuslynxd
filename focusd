@@ -251,8 +251,10 @@ class FocusLynxDaemon:
                 return FOCUSER_ERROR
 
             offset = self._max_steps[CHANNELS.index(channel)] // 2
+            status = FocuserStatus.Moving if is_moving else FocuserStatus.Idle
             return {
-                'status': FocuserStatus.Moving if is_moving else FocuserStatus.Idle,
+                'status': status,
+                'status_label': FocuserStatus.label(status, False),
                 'temperature': temp,
                 'current_steps': current - offset,
                 'target_steps': target - offset,
