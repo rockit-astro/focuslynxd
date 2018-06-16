@@ -209,6 +209,10 @@ class FocusLynxDaemon:
 
             # Use the temperature probe as a proxy for the entire focuser
             if line[10:] == b' NP\n':
+                # Skip remaining lines
+                for _ in range(11):
+                    self._port.readline()
+
                 return {'status': FocuserStatus.Disconnected}
 
             temp = float(line[10:])
