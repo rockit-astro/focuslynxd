@@ -1,5 +1,5 @@
 Name:      rasa-focuser-server
-Version:   1.0.2
+Version:   1.0.3
 Release:   0
 Url:       https://github.com/warwick-one-metre/rasa-focusd
 Summary:   Focuser control client for the RASA prototype telescope.

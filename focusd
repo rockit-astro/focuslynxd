@@ -66,14 +66,23 @@ MOVEMENT_TIMEOUT = 180
 # Maximum time that it should take to reset the home position
 HOME_POSITION_RESET_TIMEOUT = 2
 
-FOCUSER_ERROR = {'status': FocuserStatus.Error}
+FOCUSER_ERROR = {
+    'status': FocuserStatus.Error,
+    'status_label': FocuserStatus.label(FocuserStatus.Error, False)
+}
+
+FOCUSER_DISCONNECTED = {
+    'status': FocuserStatus.Disconnected,
+    'status_label': FocuserStatus.label(FocuserStatus.Disconnected, False)
+}
+
 class FocusLynxDaemon:
     """Daemon interface for Optec Focus Lynx"""
     def __init__(self):
         self._wait_condition = threading.Condition()
         self._status_lock = threading.Lock()
         self._status_date = datetime.datetime.utcnow()
-        self._status = [{'status': FocuserStatus.Disconnected} for _ in CHANNELS]
+        self._status = [FOCUSER_DISCONNECTED for _ in CHANNELS]
 
         self._max_steps = [0 for _ in CHANNELS]
         self._request_steps = [0 for _ in CHANNELS]
@@ -213,7 +222,7 @@ class FocusLynxDaemon:
                 for _ in range(11):
                     self._port.readline()
 
-                return {'status': FocuserStatus.Disconnected}
+                return FOCUSER_DISCONNECTED
 
             temp = float(line[10:])
 
@@ -373,6 +382,8 @@ class FocusLynxDaemon:
                     max_steps = self.__query_config(channel)
                     if max_steps is None:
                         self._status[i]['status'] = FocuserStatus.Error
+                        self._status[i]['status_label'] = FocuserStatus.label(FocuserStatus.Error,
+                                                                              False),
                     else:
                         self._max_steps[i] = max_steps
 
