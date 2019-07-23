@@ -5,7 +5,7 @@ _focus()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="set offset stop status json zero"
+    opts="set offset stop status json zero init kill"
 
     case "${prev}" in
         set|offset|stop|zero)
