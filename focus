@@ -16,8 +16,6 @@
 # along with rasa-focusd.  If not, see <http://www.gnu.org/licenses/>.
 
 """Commandline client for controlling an Optec Focus Lynx focuser focusd"""
-# pylint: disable=invalid-name
-# pylint: disable=broad-except
 # pylint: disable=unused-argument
 
 import datetime
@@ -56,10 +54,9 @@ def run_command(command, args):
         ret = -101
 
     # Print message associated with error codes, except for -1 (error handled locally)
-    if ret != -1 and ret != 0:
+    if ret not in [-1, 0]:
         print(CommandStatus.message(ret))
-    elif ret != -1 and ret != 0:
-        print('Returned unknown status code: {0}'.format(ret))
+
     return ret
 
 def print_status(args):

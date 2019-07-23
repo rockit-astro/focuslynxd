@@ -17,11 +17,8 @@
 
 """Daemon for controlling an Optec Focus Lynx focuser via Pyro"""
 
-# pylint: disable=broad-except
 # pylint: disable=too-many-return-statements
-# pylint: disable=too-many-instance-attributes
 # pylint: disable=too-many-branches
-# pylint: disable=too-many-statements
 
 import datetime
 import sys
