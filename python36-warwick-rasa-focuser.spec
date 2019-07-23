@@ -1,5 +1,5 @@
 Name:           python36-warwick-rasa-focuser
-Version:        1.1.0
+Version:        1.2
 Release:        0
 License:        GPL3
 Summary:        Common backend code for the RASA prototype focuser daemon

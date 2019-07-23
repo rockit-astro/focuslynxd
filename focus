@@ -42,6 +42,7 @@ FMT_CLEAR = u'\033[0m'
 CHANNELS = [1, 2]
 CHANNELS_ARG_STRING = '1|2'
 
+
 def run_command(command, args):
     """Runs a command and prints the message associated with the return code.
        Returns the return code from the command
@@ -58,6 +59,7 @@ def run_command(command, args):
         print(CommandStatus.message(ret))
 
     return ret
+
 
 def print_status(args):
     """Prints a human-readable summary of the focuser status"""
@@ -84,12 +86,14 @@ def print_status(args):
             print(label)
     return 0
 
+
 def print_json(args):
     """Prints a machine-readable summary of the focuser status"""
     with daemons.rasa_focus.connect() as focusd:
         print(json.dumps(focusd.report_status() or {}))
 
     return 0
+
 
 def set_position(args):
     """Request a focuser channel to move a specific step position"""
@@ -110,6 +114,7 @@ def set_position(args):
     print('usage: {} set ({}) <step position>'.format(SCRIPT_NAME, CHANNELS_ARG_STRING))
     return -1
 
+
 def offset_position(args):
     """Request a focuser channel to move by a specific step delta"""
     try:
@@ -129,6 +134,7 @@ def offset_position(args):
     print('usage: {} offset ({}) <step delta>'.format(SCRIPT_NAME, CHANNELS_ARG_STRING))
     return -1
 
+
 def stop(args):
     """Stop a focuser channel"""
     try:
@@ -140,6 +146,7 @@ def stop(args):
 
     print('usage: {} stop ({})'.format(SCRIPT_NAME, CHANNELS_ARG_STRING))
     return -1
+
 
 def set_home_position(args):
     """Sets the current focuser position to the home position"""
@@ -153,6 +160,19 @@ def set_home_position(args):
     print('usage: {} zero ({})'.format(SCRIPT_NAME, CHANNELS_ARG_STRING))
     return -1
 
+
+def initialize(args):
+    """Connect to the focuser"""
+    with daemons.rasa_focus.connect() as focusd:
+        return focusd.initialize()
+
+
+def shutdown(args):
+    """Disconnect from the focuser"""
+    with daemons.rasa_focus.connect() as focusd:
+        return focusd.shutdown()
+
+
 def print_usage():
     """Prints the utility help"""
     print('usage: {} <command> [<args>]'.format(SCRIPT_NAME))
@@ -165,9 +185,12 @@ def print_usage():
     print('   json         print a machine-readable summary of the focuser status')
     print('engineering commands:')
     print('   zero         sets the current focuser position to the home position')
+    print('   init         connect to the focuser')
+    print('   kill         disconnect from the focuser')
     print()
 
     return 0
+
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
@@ -180,6 +203,8 @@ if __name__ == '__main__':
         'status': print_status,
         'json': print_json,
         'zero': set_home_position,
+        'init': initialize,
+        'kill': shutdown
     }
 
     if sys.argv[1] not in commands:

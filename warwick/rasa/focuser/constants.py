@@ -37,6 +37,8 @@ class CommandStatus:
     InvalidChannel = 4
     ChannelNotAvailable = 5
     PositionOutsideLimits = 6
+    NotConnected = 7
+    NotDisconnected = 8
 
     _messages = {
         # General error codes
@@ -46,6 +48,8 @@ class CommandStatus:
         4: 'error: invalid channel',
         5: 'error: channel disconnected or in error state',
         6: 'error: requested position outside channel range',
+        7: 'error: focuser is not connected',
+        8: 'error: focuser is already connected',
 
         -100: 'error: terminated by user',
         -101: 'error: unable to communicate with focus daemon',
@@ -58,22 +62,27 @@ class CommandStatus:
             return cls._messages[error_code]
         return 'error: Unknown error code {}'.format(error_code)
 
+
 class FocuserStatus:
     """Status of the focuser hardware"""
-    Disconnected, Error, Idle, Moving = range(4)
+    Disabled, Disconnected, Error, Initializing, Idle, Moving = range(6)
 
     _labels = {
-        0: 'DISCONNECTED',
-        1: 'ERROR',
-        2: 'IDLE',
-        3: 'MOVING',
+        0: 'OFFLINE',
+        1: 'DISCONNECTED',
+        2: 'ERROR',
+        3: 'INITIALIZING',
+        4: 'IDLE',
+        5: 'MOVING',
     }
 
     _formats = {
         0: FMT_BOLD + FMT_RED,
-        1: FMT_BOLD,
-        2: FMT_BOLD,
+        1: FMT_BOLD + FMT_RED,
+        2: FMT_BOLD + FMT_RED,
         3: FMT_BOLD + FMT_YELLOW,
+        4: FMT_BOLD,
+        5: FMT_BOLD + FMT_YELLOW,
     }
 
     @classmethod
@@ -85,7 +94,7 @@ class FocuserStatus:
             if status in cls._formats and status in cls._formats:
                 return cls._formats[status] + cls._labels[status] + FMT_CLEAR
             return FMT_RED + FMT_BOLD + 'UNKNOWN' + FMT_CLEAR
-        else:
-            if status in cls._labels:
-                return cls._labels[status]
-            return 'UNKNOWN'
+
+        if status in cls._labels:
+            return cls._labels[status]
+        return 'UNKNOWN'

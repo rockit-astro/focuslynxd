@@ -23,7 +23,6 @@
 import datetime
 import sys
 import threading
-import time
 import traceback
 import serial
 import Pyro4
@@ -68,18 +67,30 @@ FOCUSER_ERROR = {
     'status_label': FocuserStatus.label(FocuserStatus.Error, False)
 }
 
+FOCUSER_DISABLED = {
+    'status': FocuserStatus.Disabled,
+    'status_label': FocuserStatus.label(FocuserStatus.Disabled, False)
+}
+
 FOCUSER_DISCONNECTED = {
     'status': FocuserStatus.Disconnected,
     'status_label': FocuserStatus.label(FocuserStatus.Disconnected, False)
 }
 
+FOCUSER_INITIALIZING = {
+    'status': FocuserStatus.Initializing,
+    'status_label': FocuserStatus.label(FocuserStatus.Initializing, False)
+}
+
+
 class FocusLynxDaemon:
     """Daemon interface for Optec Focus Lynx"""
     def __init__(self):
+        self._request_connection = False
         self._wait_condition = threading.Condition()
         self._status_lock = threading.Lock()
         self._status_date = datetime.datetime.utcnow()
-        self._status = [FOCUSER_DISCONNECTED for _ in CHANNELS]
+        self._status = [FOCUSER_DISABLED for _ in CHANNELS]
 
         self._max_steps = [0 for _ in CHANNELS]
         self._request_steps = [0 for _ in CHANNELS]
@@ -350,44 +361,58 @@ class FocusLynxDaemon:
     def __run(self):
         """Background thread managing communication over the serial connection"""
         while True:
-            # Initial setup
-            try:
-                self._port = serial.Serial(SERIAL_PORT, SERIAL_BAUD,
-                                           timeout=SERIAL_TIMEOUT)
-                print('Connected to', SERIAL_PORT)
-                prefix = 'Restored' if self._port_error else 'Established'
-                log.info(LOG_NAME, prefix + ' serial connection to the focuser')
-                self._port_error = False
-            except Exception as exception:
-                print(exception)
-                print('Will retry in 10 seconds...')
-                if not self._port_error:
-                    log.error(LOG_NAME, 'Failed to connect to the focuser')
+            if self._request_connection and not self._port:
+                # Connect to the focuser
+                try:
+                    self._status = [FOCUSER_INITIALIZING for _ in CHANNELS]
+                    self._port = serial.Serial(SERIAL_PORT, SERIAL_BAUD,
+                                               timeout=SERIAL_TIMEOUT)
+                    print('Connected to', SERIAL_PORT)
+                    prefix = 'Restored' if self._port_error else 'Established'
+                    log.info(LOG_NAME, prefix + ' serial connection to the focuser')
+                    self._port_error = False
 
-                self._port_error = True
+                    # Flush any stale state
+                    self._port.flushInput()
+                    self._port.flushOutput()
 
-                time.sleep(10.)
-                continue
+                    # Query channel config on startup
+                    for i, channel in enumerate(CHANNELS):
+                        max_steps = self.__query_config(channel)
+                        if max_steps is None:
+                            self._status[i] = FOCUSER_ERROR
+                        else:
+                            self._max_steps[i] = max_steps
 
-            try:
-                # Flush any stale state
-                self._port.flushInput()
-                self._port.flushOutput()
+                            status = self.__query_status(channel)
+                            if 'current_steps' in status:
+                                self._request_steps[i] = status['current_steps']
 
-                # Query channel config on startup
-                for i, channel in enumerate(CHANNELS):
-                    max_steps = self.__query_config(channel)
-                    if max_steps is None:
-                        self._status[i]['status'] = FocuserStatus.Error
-                        self._status[i]['status_label'] = FocuserStatus.label(FocuserStatus.Error,
-                                                                              False),
-                    else:
-                        self._max_steps[i] = max_steps
+                except Exception as exception:
+                    print(exception)
+                    print('Will retry in 5 seconds...')
+                    if not self._port_error:
+                        log.error(LOG_NAME, 'Failed to connect to the focuser')
 
-                # Main run loop
-                while True:
+                    self._port_error = True
+                    self._status = [FOCUSER_ERROR for _ in CHANNELS]
+
+            if not self._request_connection:
+                if self._port:
+                    # Disconnect from focuser
+                    self._port.close()
+                    self._port = None
+
+                with self._status_lock:
+                    if any([s['status'] != FocuserStatus.Disabled for s in self._status]):
+                        self._status_date = datetime.datetime.utcnow()
+                        self._status = [FOCUSER_DISABLED for _ in CHANNELS]
+
+            delay = IDLE_LOOP_DELAY
+            if self._request_connection and self._port:
+                try:
                     date = datetime.datetime.utcnow()
-                    status = [FOCUSER_ERROR, FOCUSER_ERROR]
+                    status = [FOCUSER_ERROR for _ in CHANNELS]
 
                     # Acquire idle locks to avoid race conditions with the command threads
                     for i, channel in enumerate(CHANNELS):
@@ -447,7 +472,6 @@ class FocusLynxDaemon:
                     # This is done as a separate step at the end to ensure that we can update
                     # the status for both channels at the same time without holding the status
                     # lock for longer than necessary.
-                    delay = IDLE_LOOP_DELAY
                     with self._status_lock:
                         self._status_date = date
                         for i, _ in enumerate(CHANNELS):
@@ -466,22 +490,22 @@ class FocusLynxDaemon:
                     for i, channel in enumerate(CHANNELS):
                         self._idle_conditions[i].release()
 
-                    # Wait for the next loop period unless woken up early by a command thread
-                    with self._wait_condition:
-                        self._wait_condition.wait(delay)
-            except Exception as exception:
-                self._port.close()
+                except Exception:
+                    self._port.close()
 
-                with self._status_lock:
-                    self._status_date = datetime.datetime.utcnow()
-                    self._status = [FOCUSER_ERROR, FOCUSER_ERROR]
+                    with self._status_lock:
+                        self._status_date = datetime.datetime.utcnow()
+                        self._status = [FOCUSER_ERROR, FOCUSER_ERROR]
 
-                traceback.print_exc(file=sys.stdout)
-                print('Will retry in 10 seconds...')
-                if not self._port_error:
-                    log.error(LOG_NAME, 'Lost serial connection to the focuser')
-                self._port_error = True
-                time.sleep(10.)
+                    traceback.print_exc(file=sys.stdout)
+                    print('Will retry in 5 seconds...')
+                    if not self._port_error:
+                        log.error(LOG_NAME, 'Lost serial connection to the focuser')
+                    self._port_error = True
+
+            # Wait for the next loop period unless woken up early by a command thread
+            with self._wait_condition:
+                self._wait_condition.wait(delay)
 
     @Pyro4.expose
     def report_status(self):
@@ -614,6 +638,69 @@ class FocusLynxDaemon:
         log.info(LOG_NAME, message)
 
         return CommandStatus.Succeeded
+
+    @Pyro4.expose
+    def initialize(self):
+        """Connects to the focuser hardware"""
+        if not pyro_client_matches(CONTROL_IPS):
+            return CommandStatus.InvalidControlIP
+
+        locked = []
+        try:
+            for lock in self._move_locks:
+                success = lock.acquire(False)
+                if not success:
+                    return CommandStatus.Blocked
+
+                locked.append(lock)
+
+            if self._request_connection:
+                return CommandStatus.NotDisconnected
+
+            self._request_connection = True
+
+            # Wake up the run loop
+            with self._wait_condition:
+                self._wait_condition.notify_all()
+
+        except Exception:
+            return CommandStatus.Failed
+        finally:
+            for lock in locked:
+                lock.release()
+        return CommandStatus.Succeeded
+
+    @Pyro4.expose
+    def shutdown(self):
+        """Disconnects from the focuser hardware"""
+        if not pyro_client_matches(CONTROL_IPS):
+            return CommandStatus.InvalidControlIP
+
+        locked = []
+        try:
+            for lock in self._move_locks:
+                success = lock.acquire(False)
+                if not success:
+                    return CommandStatus.Blocked
+
+                locked.append(lock)
+
+            if not self._request_connection:
+                return CommandStatus.NotConnected
+
+            self._request_connection = False
+
+            # Wake up the run loop
+            with self._wait_condition:
+                self._wait_condition.notify_all()
+
+        except Exception:
+            return CommandStatus.Failed
+        finally:
+            for lock in locked:
+                lock.release()
+        return CommandStatus.Succeeded
+
 
 if __name__ == '__main__':
     daemons.rasa_focus.launch(FocusLynxDaemon())
