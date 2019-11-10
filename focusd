@@ -32,12 +32,20 @@ from warwick.observatory.common import (
     log,
     TryLock)
 from warwick.observatory.common.helpers import pyro_client_matches
-from warwick.rasa.focuser import CommandStatus, FocuserStatus
+from warwick.rasa.focuser import (
+    CommandStatus,
+    FocuserStatus,
+    focuslynx_channel_config,
+    focuslynx_channel_status,
+    focuslynx_set_target_steps,
+    focuslynx_stop,
+    focuslynx_sync
+)
 
 # Set automatically when generating RPM package
 SOFTWARE_VERSION = "UNKNOWN"
 
-SERIAL_PORT = '/dev/focuser'
+SERIAL_PORT = '/dev/ttyUSB0'
 SERIAL_BAUD = 115200
 SERIAL_TIMEOUT = 5
 
@@ -62,43 +70,244 @@ MOVEMENT_TIMEOUT = 180
 # Maximum time that it should take to reset the home position
 HOME_POSITION_RESET_TIMEOUT = 2
 
-FOCUSER_ERROR = {
-    'status': FocuserStatus.Error,
-    'status_label': FocuserStatus.label(FocuserStatus.Error, False)
-}
 
-FOCUSER_DISABLED = {
-    'status': FocuserStatus.Disabled,
-    'status_label': FocuserStatus.label(FocuserStatus.Disabled, False)
-}
+class FocusChannel:
+    def __init__(self, controller, channel_number):
+        self._controller = controller
+        self._status_lock = threading.Lock()
+        self._max_steps = 0
+        self._channel_number = channel_number
 
-FOCUSER_DISCONNECTED = {
-    'status': FocuserStatus.Disconnected,
-    'status_label': FocuserStatus.label(FocuserStatus.Disconnected, False)
-}
+        # State included in the status dictionary
+        self._status = FocuserStatus.Disabled
+        self._temperature = 0
+        self._current_steps = 0
+        self._target_steps = 0
 
-FOCUSER_INITIALIZING = {
-    'status': FocuserStatus.Initializing,
-    'status_label': FocuserStatus.label(FocuserStatus.Initializing, False)
-}
+        # Command requests from the user
+        self._requested_steps = 0
+        self._requested_stop = False
+        self._requested_reset_home = False
+
+        # Locks for blocking user commands
+        self.move_lock = threading.Lock()
+        self._idle_condition = threading.Condition()
+
+    def set_initializing(self):
+        """Set FocuserStatus.Initializing and clear other state"""
+        with self._status_lock:
+            self._status = FocuserStatus.Initializing
+            self._temperature = self._current_steps = self._target_steps = 0
+
+    def set_disabled(self):
+        """Set FocuserStatus.Disabled and clear other state"""
+        with self._status_lock:
+            self._status = FocuserStatus.Disabled
+            self._temperature = self._current_steps = self._target_steps = 0
+
+    def update(self, port):
+        # An error status disables the channel until the daemon restarts
+        if self._status in [FocuserStatus.Error, FocuserStatus.Disconnected]:
+            return
+
+        # Acquire idle lock to avoid race conditions with the command threads
+        self._idle_condition.acquire()
+        with self._status_lock:
+            try:
+                reset_requested_steps = False
+                report_stopped = False
+                if self._status == FocuserStatus.Initializing:
+                    config = focuslynx_channel_config(port, self._channel_number)
+                    status = focuslynx_channel_status(port, self._channel_number)
+                    if not status:
+                        self._status = FocuserStatus.Disconnected
+
+                    self._max_steps = config['max_steps']
+                    reset_requested_steps = True
+
+                    print('Channel {} ({}) is configured as type {} with {} steps'.format(
+                        self._channel_number, config['nickname'], config['device_type'], self._max_steps))
+
+                if self._requested_stop:
+                    self._requested_stop = False
+                    focuslynx_stop(port, self._channel_number)
+                    reset_requested_steps = True
+                    report_stopped = True
+
+                if self._requested_reset_home:
+                    focuslynx_sync(port, self._channel_number, self._max_steps // 2)
+                    self._requested_reset_home = False
+                    reset_requested_steps = True
+
+                if not reset_requested_steps and self._status >= FocuserStatus.Idle and self._target_steps != self._requested_steps:
+                    focuslynx_set_target_steps(port, self._channel_number, self._requested_steps + self._max_steps // 2)
+
+                status = focuslynx_channel_status(port, self._channel_number)
+                self._status = FocuserStatus.Moving if status['is_moving'] else FocuserStatus.Idle
+                self._temperature = status['temperature']
+                self._current_steps = status['current_steps'] - self._max_steps // 2
+                self._target_steps = status['target_steps'] - self._max_steps // 2
+
+                if reset_requested_steps:
+                    self._requested_steps = self._target_steps
+
+                if report_stopped:
+                    message = 'Channel {} move stopped at {:+d}'.format(self._channel_number, self._current_steps)
+                    print(message)
+                    log.info(LOG_NAME, message)
+
+                # Wake up anything that might we waiting on the channel becoming idle
+                if self._status == FocuserStatus.Idle:
+                    self._idle_condition.notify_all()
+
+            except Exception:
+                print('error: Exception while updating channel {}.'.format(self._channel_number))
+                traceback.print_exc(file=sys.stdout)
+                self._status = FocuserStatus.Error
+                self._temperature = self._current_steps = self._target_steps = 0
+
+        # Release idle lock so the command threads can return
+        self._idle_condition.release()
+
+    def request_set_steps(self, steps, offset=False):
+        """
+        Request the channel to move to / by the requested steps
+        Blocks until the move has completed or failed
+
+        :param steps: Step position to move
+        :param offset: Interpret steps as a relative move
+
+        :return: CommandStatus describing the result of the request
+        """
+        with TryLock(self.move_lock) as success:
+            if not success:
+                return CommandStatus.Blocked
+
+            with self._status_lock:
+                if self._status < FocuserStatus.Idle:
+                    return CommandStatus.ChannelNotAvailable
+
+                if self._status != FocuserStatus.Idle:
+                    return CommandStatus.Failed
+
+                if offset:
+                    steps += self._target_steps
+
+                # Check step limits
+                hard_limit = self._max_steps // 2 - 1
+                if steps < MOVEMENT_SOFT_LIMITS[0] or steps > MOVEMENT_SOFT_LIMITS[1] \
+                        or steps < -hard_limit or steps > hard_limit:
+                    return CommandStatus.PositionOutsideLimits
+
+                # Nothing to do if we are already there
+                if self._requested_steps == steps:
+                    return CommandStatus.Succeeded
+
+                self._requested_steps = steps
+
+            # Wake the main run loop to start moving immediately
+            with self._controller.wait_condition:
+                self._controller.wait_condition.notify_all()
+
+            message = 'Requesting channel {} move to {:+d}'.format(self._channel_number, steps)
+            print(message)
+            log.info(LOG_NAME, message)
+
+            # Wait until the move has completed
+            with self._idle_condition:
+                self._idle_condition.wait(MOVEMENT_TIMEOUT)
+
+            with self._status_lock:
+                if self._status != FocuserStatus.Idle or self._target_steps != steps:
+                    message = 'Channel {} move failed'.format(self._channel_number)
+                    print(message)
+                    log.error(LOG_NAME, message)
+                    return CommandStatus.Failed
+
+            message = 'Channel {} move complete'.format(self._channel_number)
+            print(message)
+            log.info(LOG_NAME, message)
+            return CommandStatus.Succeeded
+
+    def request_reset_home(self):
+        """
+        Request the channel to reset the current position as the zero/home position
+        Blocks until the move has completed or failed
+
+        :return: CommandStatus describing the result of the request
+        """
+        with TryLock(self.move_lock) as success:
+            if not success:
+                return CommandStatus.Blocked
+
+            with self._status_lock:
+                if self._status != FocuserStatus.Idle:
+                    return CommandStatus.ChannelNotAvailable
+
+                self._requested_reset_home = True
+
+            # Wake up the run loop
+            with self._controller.wait_condition:
+                self._controller.wait_condition.notify_all()
+
+            message = 'Requesting channel {} home position reset'.format(self._channel_number)
+            print(message)
+            log.info(LOG_NAME, message)
+
+            # Wait until the move has completed
+            with self._idle_condition:
+                self._idle_condition.wait(HOME_POSITION_RESET_TIMEOUT)
+
+            with self._status_lock:
+                if self._status != FocuserStatus.Idle or self._current_steps != 0:
+                    message = 'Channel {} home position reset failed'.format(self._channel_number)
+                    print(message)
+                    log.error(LOG_NAME, message)
+                    return CommandStatus.Failed
+
+            message = 'Channel {} home position reset complete'.format(self._channel_number)
+            print(message)
+            log.info(LOG_NAME, message)
+            return CommandStatus.Succeeded
+
+    def request_stop(self):
+        """
+        Request the channel to stop moving
+
+        :return: CommandStatus.Succeeded
+        """
+        # Skip the lock so we can stop ASAP
+        # We are careful to avoid race conditions when used
+        self._requested_stop = True
+
+        message = 'Requesting channel {} stop moving'.format(self._channel_number)
+        print(message)
+        log.info(LOG_NAME, message)
+        return CommandStatus.Succeeded
+
+    def status(self):
+        with self._status_lock:
+            return {
+                'status': self._status,
+                'status_label': FocuserStatus.label(self._status, False),
+                'temperature': self._temperature,
+                'current_steps': self._current_steps,
+                'target_steps': self._target_steps,
+                'requested_steps': self._requested_steps
+            }
 
 
 class FocusLynxDaemon:
     """Daemon interface for Optec Focus Lynx"""
     def __init__(self):
+        self.wait_condition = threading.Condition()
+
         self._request_connection = False
-        self._wait_condition = threading.Condition()
         self._status_lock = threading.Lock()
         self._status_date = datetime.datetime.utcnow()
-        self._status = [FOCUSER_DISABLED for _ in CHANNELS]
 
-        self._max_steps = [0 for _ in CHANNELS]
-        self._request_steps = [0 for _ in CHANNELS]
-        self._request_stop = [False for _ in CHANNELS]
-        self._request_reset_home = [False for _ in CHANNELS]
-
-        self._move_locks = [threading.Lock() for _ in CHANNELS]
-        self._idle_conditions = [threading.Condition() for _ in CHANNELS]
+        self._channels = [FocusChannel(self, c) for c in CHANNELS]
+        self._channel_status = [c.status() for c in self._channels]
 
         self._port = None
         self._port_error = False
@@ -107,264 +316,15 @@ class FocusLynxDaemon:
         runloop.daemon = True
         runloop.start()
 
-    def __query_config(self, channel):
-        """Query the configuration for a focuser channel.
-           The channel is set to the error state if the configuration
-           is not as expected:
-              Temperature compensation off
-              Temperature compensation at start off
-              Backlash off (we may want to turn this on later)
-
-           Returns the maximum steps allowed for the channel or None on error
-        """
-        try:
-            # Clear any stray data in the input buffer
-            self._port.flushInput()
-
-            self._port.write('<F{:1d}GETCONFIG>'.format(channel).encode('ascii'))
-            line = self._port.readline()
-            if line != b'!\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `!`, got `{}`'.format(line))
-                return None
-
-            line = self._port.readline()
-            expected = 'CONFIG{:1d}\n'.format(channel).encode('ascii')
-            if line != expected:
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `{}`, got `{}`'.format(expected, line))
-                return None
-
-            line = self._port.readline()
-            if not line.startswith(b'Nickname ='):
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `Nickname = ...`, got `{}`'.format(line))
-                return None
-            nickname = line[10:].decode('ascii').strip()
-
-            line = self._port.readline()
-            if not line.startswith(b'Max Pos  ='):
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `Max Pos  = ...`, got `{}`'.format(line))
-                return None
-            max_steps = int(line[10:])
-
-            line = self._port.readline()
-            if not line.startswith(b'Dev Typ  ='):
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `Dev Typ  = ...`, got `{}`'.format(line))
-                return None
-            devicetype = line[10:].decode('ascii').strip()
-
-            print('Channel {} ({}) is configured as type {} with {} steps'.format(
-                channel, nickname, devicetype, max_steps))
-
-            line = self._port.readline()
-            if line != b'TComp ON = 0\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `TComp ON = 0`, got `{}`'.format(line))
-                return None
-
-            # Skip temperature compensation lines
-            for _ in range(6):
-                self._port.readline()
-
-            line = self._port.readline()
-            if line != b'BLC En   = 0\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `BLC En   = 0`, got `{}`'.format(line))
-                return None
-
-            # Skip backlash size, LED brightness
-            for _ in range(2):
-                self._port.readline()
-
-            line = self._port.readline()
-            if line != b'TC@Start = 0\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `TC@Start = 0`, got `{}`'.format(line))
-                return None
-
-            line = self._port.readline()
-            if line != b'END\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `END`, got `{}`'.format(line))
-                return None
-
-            return max_steps
-        except Exception:
-            print('error: Exception while querying channel {} configuration.'.format(channel))
-            traceback.print_exc(file=sys.stdout)
-            return None
-
-    def __query_status(self, channel):
-        """Query the status from a focuser channel
-            Returns a state dictionary."""
-        try:
-            # Clear any stray data in the input buffer
-            self._port.flushInput()
-
-            self._port.write('<F{:1d}GETSTATUS>'.format(channel).encode('ascii'))
-            line = self._port.readline()
-            if line != b'!\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `!`, got `{}`'.format(line))
-                return FOCUSER_ERROR
-
-            line = self._port.readline()
-            expected = 'STATUS{:1d}\n'.format(channel).encode('ascii')
-            if line != expected:
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `{}`, got `{}`'.format(expected, line))
-                return FOCUSER_ERROR
-
-            line = self._port.readline()
-            if not line.startswith(b'Temp(C)  ='):
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `Temp(C)  = ...`, got `{}`'.format(line))
-                return FOCUSER_ERROR
-
-            # Use the temperature probe as a proxy for the entire focuser
-            if line[10:] == b' NP\n':
-                # Skip remaining lines
-                for _ in range(11):
-                    self._port.readline()
-
-                return FOCUSER_DISCONNECTED
-
-            temp = float(line[10:])
-
-            line = self._port.readline()
-            if not line.startswith(b'Curr Pos ='):
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `Curr Pos = ...`, got `{}`'.format(line))
-                return FOCUSER_ERROR
-            current = int(line[10:])
-
-            line = self._port.readline()
-            if not line.startswith(b'Targ Pos ='):
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `Targ Pos = ...`, got `{}`'.format(line))
-                return FOCUSER_ERROR
-            target = int(line[10:])
-
-            line = self._port.readline()
-            if not line.startswith(b'IsMoving ='):
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `IsMoving = ...`, got `{}`'.format(line))
-                return FOCUSER_ERROR
-            is_moving = int(line[10:]) == 1
-
-            #  Skip unused lines:
-            #   IsHoming, IsHomed, FFDetect, TmpProbe
-            #   RemoteIO, Hnd Ctlr, Reverse
-            for _ in range(7):
-                self._port.readline()
-
-            line = self._port.readline()
-            if line != b'END\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `END`, got `{}`'.format(line))
-                return FOCUSER_ERROR
-
-            offset = self._max_steps[CHANNELS.index(channel)] // 2
-            status = FocuserStatus.Moving if is_moving else FocuserStatus.Idle
-            return {
-                'status': status,
-                'status_label': FocuserStatus.label(status, False),
-                'temperature': temp,
-                'current_steps': current - offset,
-                'target_steps': target - offset,
-            }
-        except Exception:
-            print('error: Exception while querying channel {} status.'.format(channel))
-            traceback.print_exc(file=sys.stdout)
-            return FOCUSER_ERROR
-
-    def __set_target_steps(self, channel, steps):
-        """Commands the given focuser channel to move to the given absolute position
-           Returns True on successful command, False on error.
-        """
-        try:
-            # Clear any stray data in the input buffer
-            self._port.flushInput()
-
-            offset = self._max_steps[CHANNELS.index(channel)] // 2
-            self._port.write('<F{:1d}MA{:06d}>'.format(channel, steps + offset).encode('ascii'))
-            line = self._port.readline()
-            if line != b'!\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `!`, got `{}`'.format(line))
-                return False
-
-            line = self._port.readline()
-            if line != b'M\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `M`, got `{}`'.format(line))
-                return False
-            return True
-        except Exception:
-            print('error: Exception while setting channel {} position.'.format(channel))
-            traceback.print_exc(file=sys.stdout)
-            return False
-
-    def __stop_channel(self, channel):
-        """Issues a stop command to the given focuser channel.
-           Returns True on successful command, False on error.
-        """
-        try:
-            # Clear any stray data in the input buffer
-            self._port.flushInput()
-
-            self._port.write('<F{:1d}HALT>'.format(channel).encode('ascii'))
-            line = self._port.readline()
-            if line != b'!\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `!`, got `{}`'.format(line))
-                return False
-
-            line = self._port.readline()
-            if line != b'HALTED\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `HALTED`, got `{}`'.format(line))
-                return False
-            return True
-        except Exception:
-            print('error: Exception while stopping channel {} movement.'.format(channel))
-            traceback.print_exc(file=sys.stdout)
-            return False
-
-    def __set_home_position(self, channel):
-        """Resets the channel step range so that the current position
-           is half way through the allowed range, repored at 0 to the user.
-           Returns True on successful command, false on error.
-        """
-        try:
-            # Clear any stray data in the input buffer
-            self._port.flushInput()
-
-            # Set the current position to the range midpoint
-            midpoint = self._max_steps[CHANNELS.index(channel)] // 2
-            self._port.write('<F{:1d}SCCP{:06d}>'.format(channel, midpoint).encode('ascii'))
-            line = self._port.readline()
-            if line != b'!\n':
-                print('error: Unexpected data returned from focuser.')
-                print('Expected `!`, got `{}`'.format(line))
-                return False
-
-            return True
-        except Exception:
-            print('error: Exception while setting channel {} home position.'.format(channel))
-            traceback.print_exc(file=sys.stdout)
-            return False
-
     def __run(self):
         """Background thread managing communication over the serial connection"""
         while True:
             if self._request_connection and not self._port:
                 # Connect to the focuser
                 try:
-                    self._status = [FOCUSER_INITIALIZING for _ in CHANNELS]
+                    for c in self._channels:
+                        c.set_initializing()
+
                     self._port = serial.Serial(SERIAL_PORT, SERIAL_BAUD,
                                                timeout=SERIAL_TIMEOUT)
                     print('Connected to', SERIAL_PORT)
@@ -376,18 +336,6 @@ class FocusLynxDaemon:
                     self._port.flushInput()
                     self._port.flushOutput()
 
-                    # Query channel config on startup
-                    for i, channel in enumerate(CHANNELS):
-                        max_steps = self.__query_config(channel)
-                        if max_steps is None:
-                            self._status[i] = FOCUSER_ERROR
-                        else:
-                            self._max_steps[i] = max_steps
-
-                            status = self.__query_status(channel)
-                            if 'current_steps' in status:
-                                self._request_steps[i] = status['current_steps']
-
                 except Exception as exception:
                     print(exception)
                     print('Will retry in 5 seconds...')
@@ -395,7 +343,8 @@ class FocusLynxDaemon:
                         log.error(LOG_NAME, 'Failed to connect to the focuser')
 
                     self._port_error = True
-                    self._status = [FOCUSER_ERROR for _ in CHANNELS]
+                    for c in self._channels:
+                        c.set_disabled()
 
             if not self._request_connection:
                 if self._port:
@@ -404,69 +353,19 @@ class FocusLynxDaemon:
                     self._port = None
 
                 with self._status_lock:
-                    if any([s['status'] != FocuserStatus.Disabled for s in self._status]):
-                        self._status_date = datetime.datetime.utcnow()
-                        self._status = [FOCUSER_DISABLED for _ in CHANNELS]
+                    for c in self._channels:
+                        if c.status != FocuserStatus.Disabled:
+                            c.set_disabled()
+                            self._status_date = datetime.datetime.utcnow()
 
             delay = IDLE_LOOP_DELAY
             if self._request_connection and self._port:
                 try:
                     date = datetime.datetime.utcnow()
-                    status = [FOCUSER_ERROR for _ in CHANNELS]
-
-                    # Acquire idle locks to avoid race conditions with the command threads
-                    for i, channel in enumerate(CHANNELS):
-                        self._idle_conditions[i].acquire()
 
                     # Run the update loop for each channel
-                    for i, channel in enumerate(CHANNELS):
-                        # An error status disables the channel until the daemon restarts
-                        if self._status[i]['status'] == FocuserStatus.Error:
-                            continue
-
-                        if self._request_stop[i]:
-                            if self.__stop_channel(channel):
-                                self._request_stop[i] = False
-
-                                # Query the status so we can reset the requested steps
-                                status[i] = self.__query_status(channel)
-                                self._request_steps[i] = status[i]['target_steps']
-                                message = 'Channel {} move stopped at {:+d}'.format(
-                                    channel, status[i]['target_steps'])
-                                print(message)
-                                log.info(LOG_NAME, message)
-                            else:
-                                message = 'Channel {} move failed to stop'.format(channel)
-                                print(message)
-                                log.error(LOG_NAME, message)
-
-                                # Skipping the query below keeps the channel in the error state
-                                continue
-                        else:
-                            status[i] = self.__query_status(channel)
-
-                        # First query after a restart sets the requested steps
-                        # to avoid unnecessary movements
-                        if self._status[i]['status'] == FocuserStatus.Disconnected \
-                                and status[i]['status'] > FocuserStatus.Error:
-                            self._request_steps[i] = status[i]['target_steps']
-
-                        if self._request_reset_home[i]:
-                            self.__set_home_position(channel)
-                            self._request_steps[i] = 0
-                            self._request_reset_home[i] = False
-                            status[i] = self.__query_status(channel)
-
-                        # Atomic read, so don't need a lock
-                        request_steps = self._request_steps[i]
-
-                        if status[i]['status'] >= FocuserStatus.Idle and \
-                                status[i]['target_steps'] != request_steps:
-                            if self.__set_target_steps(channel, request_steps):
-                                # Refresh the status to include the move command
-                                status[i] = self.__query_status(channel)
-                            else:
-                                status[i] = FOCUSER_ERROR
+                    for c in self._channels:
+                        c.update(self._port)
 
                     # Update the status exposed to consumers
                     # This is done as a separate step at the end to ensure that we can update
@@ -474,28 +373,20 @@ class FocusLynxDaemon:
                     # lock for longer than necessary.
                     with self._status_lock:
                         self._status_date = date
-                        for i, _ in enumerate(CHANNELS):
-                            # Update channel status
-                            self._status[i] = status[i]
+                        # Update channel status
+                        self._channel_status = [c.status() for c in self._channels]
 
-                            # Reduce polling time if any channels are still moving
-                            if status[i]['status'] == FocuserStatus.Moving:
-                                delay = MOVING_LOOP_DELAY
-
-                            # Wake up anything that might we waiting on the channel becoming idle
-                            if status[i]['status'] == FocuserStatus.Idle:
-                                self._idle_conditions[i].notify_all()
-
-                    # Release idle locks so the command threads can return
-                    for i, channel in enumerate(CHANNELS):
-                        self._idle_conditions[i].release()
+                        # Reduce polling time if any channels are still moving
+                        if any([c['status'] == FocuserStatus.Moving for c in self._channel_status]):
+                            delay = MOVING_LOOP_DELAY
 
                 except Exception:
                     self._port.close()
 
                     with self._status_lock:
                         self._status_date = datetime.datetime.utcnow()
-                        self._status = [FOCUSER_ERROR, FOCUSER_ERROR]
+                        for c in self._channels:
+                            c.set_disabled()
 
                     traceback.print_exc(file=sys.stdout)
                     print('Will retry in 5 seconds...')
@@ -504,8 +395,8 @@ class FocusLynxDaemon:
                     self._port_error = True
 
             # Wait for the next loop period unless woken up early by a command thread
-            with self._wait_condition:
-                self._wait_condition.wait(delay)
+            with self.wait_condition:
+                self.wait_condition.wait(delay)
 
     @Pyro4.expose
     def report_status(self):
@@ -514,7 +405,7 @@ class FocusLynxDaemon:
             return {
                 'date': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'software_version': SOFTWARE_VERSION,
-                'channels': self._status
+                'channels': self._channel_status
             }
 
     @Pyro4.expose
@@ -526,55 +417,7 @@ class FocusLynxDaemon:
         if channel not in CHANNELS:
             return CommandStatus.InvalidChannel
 
-        i = CHANNELS.index(channel)
-        with TryLock(self._move_locks[i]) as success:
-            if not success:
-                return CommandStatus.Blocked
-
-            with self._status_lock:
-                if self._status[i]['status'] < FocuserStatus.Idle:
-                    return CommandStatus.ChannelNotAvailable
-
-                if self._status[i]['status'] != FocuserStatus.Idle:
-                    return CommandStatus.Failed
-
-                if offset:
-                    steps += self._status[i]['target_steps']
-
-            # Check step limits
-            hard_limit = self._max_steps[i] // 2 - 1
-            if steps < MOVEMENT_SOFT_LIMITS[0] or steps > MOVEMENT_SOFT_LIMITS[1] \
-                    or steps < -hard_limit or steps > hard_limit:
-                return CommandStatus.PositionOutsideLimits
-
-            # Nothing to do if we are already there
-            if self._request_steps[i] == steps:
-                return CommandStatus.Succeeded
-
-            self._request_steps[i] = steps
-
-            # Wake up the run loop to start moving immediately
-            with self._wait_condition:
-                self._wait_condition.notify_all()
-
-            print('Requesting channel {} move to {:+d}'.format(channel, steps))
-            log.info(LOG_NAME, 'Requesting channel {} move to {:+d}'.format(channel, steps))
-
-            # Wait until the move has completed
-            with self._idle_conditions[i]:
-                self._idle_conditions[i].wait(MOVEMENT_TIMEOUT)
-
-            with self._status_lock:
-                if self._status[i]['status'] != FocuserStatus.Idle or \
-                        self._status[i]['target_steps'] != steps:
-                    message = 'Channel {} move failed'.format(channel)
-                    print(message)
-                    log.error(LOG_NAME, message)
-                    return CommandStatus.Failed
-
-            print('Channel {} move complete'.format(channel))
-            log.info(LOG_NAME, 'Channel {} move complete'.format(channel))
-            return CommandStatus.Succeeded
+        return self._channels[CHANNELS.index(channel)].request_set_steps(steps, offset)
 
     @Pyro4.expose
     def reset_home_position(self, channel):
@@ -585,41 +428,7 @@ class FocusLynxDaemon:
         if channel not in CHANNELS:
             return CommandStatus.InvalidChannel
 
-        i = CHANNELS.index(channel)
-        with TryLock(self._move_locks[i]) as success:
-            if not success:
-                return CommandStatus.Blocked
-
-            with self._status_lock:
-                if self._status[i]['status'] != FocuserStatus.Idle:
-                    return CommandStatus.ChannelNotAvailable
-
-            self._request_reset_home[i] = True
-
-            # Wake up the run loop
-            with self._wait_condition:
-                self._wait_condition.notify_all()
-
-            message = 'Requesting channel {} home position reset'.format(channel)
-            print(message)
-            log.info(LOG_NAME, message)
-
-            # Wait until the move has completed
-            with self._idle_conditions[i]:
-                self._idle_conditions[i].wait(HOME_POSITION_RESET_TIMEOUT)
-
-            with self._status_lock:
-                if self._status[i]['status'] != FocuserStatus.Idle or \
-                        self._status[i]['current_steps'] != 0:
-                    message = 'Channel {} home position reset failed'.format(channel)
-                    print(message)
-                    log.error(LOG_NAME, message)
-                    return CommandStatus.Failed
-
-            message = 'Channel {} home position reset complete'.format(channel)
-            print(message)
-            log.info(LOG_NAME, message)
-            return CommandStatus.Succeeded
+        return self._channels[CHANNELS.index(channel)].request_reset_home()
 
     @Pyro4.expose
     def stop_channel(self, channel):
@@ -630,14 +439,7 @@ class FocusLynxDaemon:
         if channel not in CHANNELS:
             return CommandStatus.InvalidChannel
 
-        i = CHANNELS.index(channel)
-        self._request_stop[i] = True
-
-        message = 'Requesting channel {} stop moving'.format(channel)
-        print(message)
-        log.info(LOG_NAME, message)
-
-        return CommandStatus.Succeeded
+        return self._channels[CHANNELS.index(channel)].request_stop()
 
     @Pyro4.expose
     def initialize(self):
@@ -647,12 +449,12 @@ class FocusLynxDaemon:
 
         locked = []
         try:
-            for lock in self._move_locks:
-                success = lock.acquire(False)
+            for c in self._channels:
+                success = c.move_lock.acquire(False)
                 if not success:
                     return CommandStatus.Blocked
 
-                locked.append(lock)
+                locked.append(c.move_lock)
 
             if self._request_connection:
                 return CommandStatus.NotDisconnected
@@ -660,8 +462,8 @@ class FocusLynxDaemon:
             self._request_connection = True
 
             # Wake up the run loop
-            with self._wait_condition:
-                self._wait_condition.notify_all()
+            with self.wait_condition:
+                self.wait_condition.notify_all()
 
         except Exception:
             return CommandStatus.Failed
@@ -678,12 +480,12 @@ class FocusLynxDaemon:
 
         locked = []
         try:
-            for lock in self._move_locks:
-                success = lock.acquire(False)
+            for c in self._channels:
+                success = c.move_lock.acquire(False)
                 if not success:
                     return CommandStatus.Blocked
 
-                locked.append(lock)
+                locked.append(c.move_lock)
 
             if not self._request_connection:
                 return CommandStatus.NotConnected
@@ -691,8 +493,8 @@ class FocusLynxDaemon:
             self._request_connection = False
 
             # Wake up the run loop
-            with self._wait_condition:
-                self._wait_condition.notify_all()
+            with self.wait_condition:
+                self.wait_condition.notify_all()
 
         except Exception:
             return CommandStatus.Failed
