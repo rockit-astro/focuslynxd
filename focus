@@ -28,6 +28,7 @@ from warwick.rasa.focuser import CommandStatus, FocuserStatus
 
 # Set automatically when generating RPM package
 SOFTWARE_VERSION = 'UNKNOWN'
+DAEMON = daemons.rasa_focus
 
 SCRIPT_NAME = os.path.basename(sys.argv[0])
 sys.excepthook = Pyro4.util.excepthook
@@ -43,12 +44,12 @@ CHANNELS = [1, 2]
 CHANNELS_ARG_STRING = '1|2'
 
 
-def run_command(command, args):
+def run_command(command, daemon, args):
     """Runs a command and prints the message associated with the return code.
        Returns the return code from the command
     """
     try:
-        ret = command(args)
+        ret = command(daemon, args)
     except KeyboardInterrupt:
         ret = -100
     except Pyro4.errors.CommunicationError:
@@ -61,9 +62,9 @@ def run_command(command, args):
     return ret
 
 
-def print_status(args):
+def print_status(daemon, args):
     """Prints a human-readable summary of the focuser status"""
-    with daemons.rasa_focus.connect() as focusd:
+    with daemon.connect() as focusd:
         data = focusd.report_status()
 
     if data is not None:
@@ -87,15 +88,15 @@ def print_status(args):
     return 0
 
 
-def print_json(args):
+def print_json(daemon, args):
     """Prints a machine-readable summary of the focuser status"""
-    with daemons.rasa_focus.connect() as focusd:
+    with daemon.connect() as focusd:
         print(json.dumps(focusd.report_status() or {}))
 
     return 0
 
 
-def set_position(args):
+def set_position(daemon, args):
     """Request a focuser channel to move a specific step position"""
     try:
         if len(args) == 2 and int(args[0]) in CHANNELS:
@@ -103,11 +104,11 @@ def set_position(args):
             position = int(args[1])
 
             try:
-                with daemons.rasa_focus.connect(timeout=0) as focusd:
+                with daemon.connect(timeout=0) as focusd:
                     return focusd.set_focus(channel, position)
             except KeyboardInterrupt:
                 # ctrl-c terminates the running command
-                with daemons.rasa_focus.connect() as focusd:
+                with daemon.connect() as focusd:
                     return focusd.stop_channel(channel)
     except ValueError:
         pass
@@ -115,7 +116,7 @@ def set_position(args):
     return -1
 
 
-def offset_position(args):
+def offset_position(daemon, args):
     """Request a focuser channel to move by a specific step delta"""
     try:
         if len(args) == 2 and int(args[0]) in CHANNELS:
@@ -123,11 +124,11 @@ def offset_position(args):
             delta = int(args[1])
 
             try:
-                with daemons.rasa_focus.connect(timeout=0) as focusd:
+                with daemon.connect(timeout=0) as focusd:
                     return focusd.set_focus(channel, delta, offset=True)
             except KeyboardInterrupt:
                 # ctrl-c terminates the running command
-                with daemons.rasa_focus.connect() as focusd:
+                with daemon.connect() as focusd:
                     return focusd.stop_channel(channel)
     except ValueError:
         pass
@@ -135,11 +136,11 @@ def offset_position(args):
     return -1
 
 
-def stop(args):
+def stop(daemon, args):
     """Stop a focuser channel"""
     try:
         if len(args) == 1 and int(args[0]) in CHANNELS:
-            with daemons.rasa_focus.connect() as focusd:
+            with daemon.connect() as focusd:
                 return focusd.stop_channel(int(args[0]))
     except ValueError:
         pass
@@ -148,11 +149,11 @@ def stop(args):
     return -1
 
 
-def set_home_position(args):
+def set_home_position(daemon, args):
     """Sets the current focuser position to the home position"""
     try:
         if len(args) == 1 and int(args[0]) in CHANNELS:
-            with daemons.rasa_focus.connect() as focusd:
+            with daemon.connect() as focusd:
                 return focusd.reset_home_position(int(args[0]))
     except ValueError:
         pass
@@ -161,15 +162,15 @@ def set_home_position(args):
     return -1
 
 
-def initialize(args):
+def initialize(daemon, rgs):
     """Connect to the focuser"""
-    with daemons.rasa_focus.connect() as focusd:
+    with daemon.connect() as focusd:
         return focusd.initialize()
 
 
-def shutdown(args):
+def shutdown(daemon, args):
     """Disconnect from the focuser"""
-    with daemons.rasa_focus.connect() as focusd:
+    with daemon.connect() as focusd:
         return focusd.shutdown()
 
 
@@ -210,4 +211,4 @@ if __name__ == '__main__':
     if sys.argv[1] not in commands:
         sys.exit(print_usage())
 
-    sys.exit(run_command(commands[sys.argv[1]], sys.argv[2:]))
+    sys.exit(run_command(commands[sys.argv[1]], DAEMON, sys.argv[2:]))

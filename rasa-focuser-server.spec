@@ -19,10 +19,12 @@ focusd interfaces with and wraps the Optec focusers and exposes them via Pyro.
 mkdir -p %{buildroot}%{_bindir}
 mkdir -p %{buildroot}%{_unitdir}
 mkdir -p %{buildroot}%{_udevrulesdir}
+mkdir -p %{buildroot}%{_sysconfdir}/focusd/
 
 %{__install} %{_sourcedir}/focusd %{buildroot}%{_bindir}
 %{__install} %{_sourcedir}/rasa_focusd.service %{buildroot}%{_unitdir}
 %{__install} %{_sourcedir}/10-rasa-focuser.rules %{buildroot}%{_udevrulesdir}
+%{__install} %{_sourcedir}/rasa.json %{buildroot}%{_sysconfdir}/focusd/
 
 %post
 %systemd_post rasa_focusd.service
@@ -39,5 +41,6 @@ mkdir -p %{buildroot}%{_udevrulesdir}
 %defattr(0644,root,root,-)
 %{_udevrulesdir}/10-rasa-focuser.rules
 %{_unitdir}/rasa_focusd.service
+%{_sysconfdir}/focusd/rasa.json
 
 %changelog

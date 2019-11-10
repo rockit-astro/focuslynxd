@@ -16,6 +16,7 @@
 
 """focusd common code"""
 
+from .config import Config
 from .constants import CommandStatus, FocuserStatus
 from .focuslynx import (UnexpectedResponseError, focuslynx_channel_config, focuslynx_channel_status,
                         focuslynx_set_target_steps, focuslynx_stop, focuslynx_sync)

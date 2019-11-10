@@ -20,6 +20,7 @@
 # pylint: disable=too-many-return-statements
 # pylint: disable=too-many-branches
 
+import argparse
 import datetime
 import sys
 import threading
@@ -27,13 +28,12 @@ import traceback
 import serial
 import Pyro4
 from warwick.observatory.common import (
-    daemons,
-    IP,
     log,
     TryLock)
 from warwick.observatory.common.helpers import pyro_client_matches
 from warwick.rasa.focuser import (
     CommandStatus,
+    Config,
     FocuserStatus,
     focuslynx_channel_config,
     focuslynx_channel_status,
@@ -45,31 +45,7 @@ from warwick.rasa.focuser import (
 # Set automatically when generating RPM package
 SOFTWARE_VERSION = "UNKNOWN"
 
-SERIAL_PORT = '/dev/ttyUSB0'
-SERIAL_BAUD = 115200
-SERIAL_TIMEOUT = 5
-
-LOG_NAME = 'rasa_focusd'
-
-CONTROL_IPS = [IP.RASAMain]
-
 CHANNELS = [1, 2]
-
-# Delay between focuser queries (in seconds)
-IDLE_LOOP_DELAY = 5.0
-MOVING_LOOP_DELAY = 0.5
-
-# Limit focuser movements to a smaller range around central focus
-# These must be set smaller than half of the hardware step range
-# TODO: These need to be calibrated based on real telescope tests
-MOVEMENT_SOFT_LIMITS = [-50000, 50000]
-
-# Maximum time (in seconds) that any move command should take
-MOVEMENT_TIMEOUT = 180
-
-# Maximum time that it should take to reset the home position
-HOME_POSITION_RESET_TIMEOUT = 2
-
 
 class FocusChannel:
     def __init__(self, controller, channel_number):
@@ -154,7 +130,7 @@ class FocusChannel:
                 if report_stopped:
                     message = 'Channel {} move stopped at {:+d}'.format(self._channel_number, self._current_steps)
                     print(message)
-                    log.info(LOG_NAME, message)
+                    log.info(self._controller.config.log_name, message)
 
                 # Wake up anything that might we waiting on the channel becoming idle
                 if self._status == FocuserStatus.Idle:
@@ -163,6 +139,7 @@ class FocusChannel:
             except Exception:
                 print('error: Exception while updating channel {}.'.format(self._channel_number))
                 traceback.print_exc(file=sys.stdout)
+                log.error(self._controller.config.log_name, 'Exception while updating channel {}'.format(self._channel_number))
                 self._status = FocuserStatus.Error
                 self._temperature = self._current_steps = self._target_steps = 0
 
@@ -195,7 +172,7 @@ class FocusChannel:
 
                 # Check step limits
                 hard_limit = self._max_steps // 2 - 1
-                if steps < MOVEMENT_SOFT_LIMITS[0] or steps > MOVEMENT_SOFT_LIMITS[1] \
+                if steps < self._controller.config.soft_step_limits[0] or steps > self._controller.config.soft_step_limits[1] \
                         or steps < -hard_limit or steps > hard_limit:
                     return CommandStatus.PositionOutsideLimits
 
@@ -211,22 +188,22 @@ class FocusChannel:
 
             message = 'Requesting channel {} move to {:+d}'.format(self._channel_number, steps)
             print(message)
-            log.info(LOG_NAME, message)
+            log.info(self._controller.config.log_name, message)
 
             # Wait until the move has completed
             with self._idle_condition:
-                self._idle_condition.wait(MOVEMENT_TIMEOUT)
+                self._idle_condition.wait(self._controller.config.move_timeout)
 
             with self._status_lock:
                 if self._status != FocuserStatus.Idle or self._target_steps != steps:
                     message = 'Channel {} move failed'.format(self._channel_number)
                     print(message)
-                    log.error(LOG_NAME, message)
+                    log.error(self._controller.config.log_name, message)
                     return CommandStatus.Failed
 
             message = 'Channel {} move complete'.format(self._channel_number)
             print(message)
-            log.info(LOG_NAME, message)
+            log.info(self._controller.config.log_name, message)
             return CommandStatus.Succeeded
 
     def request_reset_home(self):
@@ -252,22 +229,22 @@ class FocusChannel:
 
             message = 'Requesting channel {} home position reset'.format(self._channel_number)
             print(message)
-            log.info(LOG_NAME, message)
+            log.info(self._controller.config.log_name, message)
 
             # Wait until the move has completed
             with self._idle_condition:
-                self._idle_condition.wait(HOME_POSITION_RESET_TIMEOUT)
+                self._idle_condition.wait(self._controller.config.home_reset_timeout)
 
             with self._status_lock:
                 if self._status != FocuserStatus.Idle or self._current_steps != 0:
                     message = 'Channel {} home position reset failed'.format(self._channel_number)
                     print(message)
-                    log.error(LOG_NAME, message)
+                    log.error(self._controller.config.log_name, message)
                     return CommandStatus.Failed
 
             message = 'Channel {} home position reset complete'.format(self._channel_number)
             print(message)
-            log.info(LOG_NAME, message)
+            log.info(self._controller.config.log_name, message)
             return CommandStatus.Succeeded
 
     def request_stop(self):
@@ -282,7 +259,7 @@ class FocusChannel:
 
         message = 'Requesting channel {} stop moving'.format(self._channel_number)
         print(message)
-        log.info(LOG_NAME, message)
+        log.info(self._controller.config.log_name, message)
         return CommandStatus.Succeeded
 
     def status(self):
@@ -299,8 +276,9 @@ class FocusChannel:
 
 class FocusLynxDaemon:
     """Daemon interface for Optec Focus Lynx"""
-    def __init__(self):
+    def __init__(self, config):
         self.wait_condition = threading.Condition()
+        self.config = config
 
         self._request_connection = False
         self._status_lock = threading.Lock()
@@ -325,11 +303,11 @@ class FocusLynxDaemon:
                     for c in self._channels:
                         c.set_initializing()
 
-                    self._port = serial.Serial(SERIAL_PORT, SERIAL_BAUD,
-                                               timeout=SERIAL_TIMEOUT)
-                    print('Connected to', SERIAL_PORT)
+                    self._port = serial.Serial(self.config.serial_port, self.config.serial_baud,
+                                               timeout=self.config.serial_timeout)
+                    print('Connected to', self.config.serial_port)
                     prefix = 'Restored' if self._port_error else 'Established'
-                    log.info(LOG_NAME, prefix + ' serial connection to the focuser')
+                    log.info(self.config.log_name, prefix + ' serial connection to the focuser')
                     self._port_error = False
 
                     # Flush any stale state
@@ -340,7 +318,7 @@ class FocusLynxDaemon:
                     print(exception)
                     print('Will retry in 5 seconds...')
                     if not self._port_error:
-                        log.error(LOG_NAME, 'Failed to connect to the focuser')
+                        log.error(self.config.log_name, 'Failed to connect to the focuser')
 
                     self._port_error = True
                     for c in self._channels:
@@ -358,7 +336,7 @@ class FocusLynxDaemon:
                             c.set_disabled()
                             self._status_date = datetime.datetime.utcnow()
 
-            delay = IDLE_LOOP_DELAY
+            delay = self.config.idle_loop_delay
             if self._request_connection and self._port:
                 try:
                     date = datetime.datetime.utcnow()
@@ -378,7 +356,7 @@ class FocusLynxDaemon:
 
                         # Reduce polling time if any channels are still moving
                         if any([c['status'] == FocuserStatus.Moving for c in self._channel_status]):
-                            delay = MOVING_LOOP_DELAY
+                            delay = self.config.moving_loop_delay
 
                 except Exception:
                     self._port.close()
@@ -391,7 +369,7 @@ class FocusLynxDaemon:
                     traceback.print_exc(file=sys.stdout)
                     print('Will retry in 5 seconds...')
                     if not self._port_error:
-                        log.error(LOG_NAME, 'Lost serial connection to the focuser')
+                        log.error(self.config.log_name, 'Lost serial connection to the focuser')
                     self._port_error = True
 
             # Wait for the next loop period unless woken up early by a command thread
@@ -411,7 +389,7 @@ class FocusLynxDaemon:
     @Pyro4.expose
     def set_focus(self, channel, steps, offset=False):
         """Request a focuser channel to move a specific step position"""
-        if not pyro_client_matches(CONTROL_IPS):
+        if not pyro_client_matches(self.config.control_ips):
             return CommandStatus.InvalidControlIP
 
         if channel not in CHANNELS:
@@ -422,7 +400,7 @@ class FocusLynxDaemon:
     @Pyro4.expose
     def reset_home_position(self, channel):
         """Request a focuser channel to reset its home position to its current position"""
-        if not pyro_client_matches(CONTROL_IPS):
+        if not pyro_client_matches(self.config.control_ips):
             return CommandStatus.InvalidControlIP
 
         if channel not in CHANNELS:
@@ -433,7 +411,7 @@ class FocusLynxDaemon:
     @Pyro4.expose
     def stop_channel(self, channel):
         """Stop any in progress movement"""
-        if not pyro_client_matches(CONTROL_IPS):
+        if not pyro_client_matches(self.config.control_ips):
             return CommandStatus.InvalidControlIP
 
         if channel not in CHANNELS:
@@ -444,7 +422,7 @@ class FocusLynxDaemon:
     @Pyro4.expose
     def initialize(self):
         """Connects to the focuser hardware"""
-        if not pyro_client_matches(CONTROL_IPS):
+        if not pyro_client_matches(self.config.control_ips):
             return CommandStatus.InvalidControlIP
 
         locked = []
@@ -475,7 +453,7 @@ class FocusLynxDaemon:
     @Pyro4.expose
     def shutdown(self):
         """Disconnects from the focuser hardware"""
-        if not pyro_client_matches(CONTROL_IPS):
+        if not pyro_client_matches(self.config.control_ips):
             return CommandStatus.InvalidControlIP
 
         locked = []
@@ -505,4 +483,8 @@ class FocusLynxDaemon:
 
 
 if __name__ == '__main__':
-    daemons.rasa_focus.launch(FocusLynxDaemon())
+    parser = argparse.ArgumentParser(description='Focus Server')
+    parser.add_argument('config', help='Path to configuration json file')
+    args = parser.parse_args()
+    _config = Config(args.config)
+    _config.daemon.launch(FocusLynxDaemon(_config))
