@@ -1,4 +1,4 @@
-Name:           python36-warwick-rasa-focuser
+Name:           python3-warwick-rasa-focuser
 Version:        2.0
 Release:        0
 License:        GPL3

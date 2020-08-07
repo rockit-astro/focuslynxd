@@ -1,12 +1,12 @@
 Name:      rasa-focuser-client
-Version:   2.0.0
+Version:   2.0.1
 Release:   0
 Url:       https://github.com/warwick-one-metre/rasa-focusd
 Summary:   Focuser control client for the RASA prototype telescope.
 License:   GPL-3.0
 Group:     Unspecified
 BuildArch: noarch
-Requires:  python36, python36-Pyro4, python36-warwick-observatory-common, python36-warwick-rasa-focuser
+Requires:  python3, python3-Pyro4, python3-warwick-observatory-common, python3-warwick-rasa-focuser
 
 %description
 Part of the observatory software for the RASA prototype telescope.

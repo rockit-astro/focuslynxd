@@ -13,7 +13,7 @@ all:
 	awk '{sub("SOFTWARE_VERSION = .*$$","SOFTWARE_VERSION = \"$(SERVER_VERSION) ($(GIT_VERSION))\""); print $0}' focusd.bak > focusd
 	${RPMBUILD} -ba rasa-focuser-server.spec
 	${RPMBUILD} -ba rasa-focuser-client.spec
-	${RPMBUILD} -ba python36-warwick-rasa-focuser.spec
+	${RPMBUILD} -ba python3-warwick-rasa-focuser.spec
 	mv build/noarch/*.rpm .
 	rm -rf build
 	mv focusd.bak focusd
