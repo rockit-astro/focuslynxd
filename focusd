@@ -1,24 +1,21 @@
 #!/usr/bin/env python3.6
 #
-# This file is part of rasa-focusd.
+# This file is part of focuslynxd.
 #
-# rasa-focusd is free software: you can redistribute it and/or modify
+# focuslynxd is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
-# rasa-focusd is distributed in the hope that it will be useful,
+# focuslynxd is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with rasa-focusd.  If not, see <http://www.gnu.org/licenses/>.
+# along with focuslynxd.  If not, see <http://www.gnu.org/licenses/>.
 
 """Daemon for controlling an Optec Focus Lynx focuser via Pyro"""
-
-# pylint: disable=too-many-return-statements
-# pylint: disable=too-many-branches
 
 import argparse
 import datetime
@@ -27,11 +24,9 @@ import threading
 import traceback
 import serial
 import Pyro4
-from warwick.observatory.common import (
-    log,
-    TryLock)
+from warwick.observatory.common import log, TryLock
 from warwick.observatory.common.helpers import pyro_client_matches
-from warwick.rasa.focuser import (
+from warwick.observatory.focuslynx import (
     CommandStatus,
     Config,
     FocuserStatus,
@@ -46,6 +41,7 @@ from warwick.rasa.focuser import (
 SOFTWARE_VERSION = "UNKNOWN"
 
 CHANNELS = [1, 2]
+
 
 class FocusChannel:
     def __init__(self, controller, channel_number):

@@ -1,30 +1,23 @@
 #
-# This file is part of rasa-camd
+# This file is part of focuslynxd
 #
-# rasa-camd is free software: you can redistribute it and/or modify
+# focuslynxd is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
-# rasa-camd is distributed in the hope that it will be useful,
+# focuslynxd is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with rasa-camd.  If not, see <http://www.gnu.org/licenses/>.
+# along with focuslynxd.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Constants and status codes used by rasa-camd"""
+"""Constants and status codes used by focusd"""
 
-# pylint: disable=too-few-public-methods
-# pylint: disable=invalid-name
+from warwick.observatory.common import TFmt
 
-FMT_GREEN = u'\033[92m'
-FMT_RED = u'\033[91m'
-FMT_CYAN = u'\033[96m'
-FMT_YELLOW = u'\033[93m'
-FMT_BOLD = u'\033[1m'
-FMT_CLEAR = u'\033[0m'
 
 class CommandStatus:
     """Numeric return codes"""
@@ -77,12 +70,12 @@ class FocuserStatus:
     }
 
     _formats = {
-        0: FMT_BOLD + FMT_RED,
-        1: FMT_BOLD + FMT_RED,
-        2: FMT_BOLD + FMT_RED,
-        3: FMT_BOLD + FMT_YELLOW,
-        4: FMT_BOLD,
-        5: FMT_BOLD + FMT_YELLOW,
+        0: TFmt.Bold + TFmt.Red,
+        1: TFmt.Bold + TFmt.Red,
+        2: TFmt.Bold + TFmt.Red,
+        3: TFmt.Bold + TFmt.Yellow,
+        4: TFmt.Bold,
+        5: TFmt.Bold + TFmt.Yellow,
     }
 
     @classmethod
@@ -92,8 +85,8 @@ class FocuserStatus:
         """
         if formatting:
             if status in cls._formats and status in cls._formats:
-                return cls._formats[status] + cls._labels[status] + FMT_CLEAR
-            return FMT_RED + FMT_BOLD + 'UNKNOWN' + FMT_CLEAR
+                return cls._formats[status] + cls._labels[status] + TFmt.Clear
+            return TFmt.Red + TFmt.Bold + 'UNKNOWN' + TFmt.Clear
 
         if status in cls._labels:
             return cls._labels[status]

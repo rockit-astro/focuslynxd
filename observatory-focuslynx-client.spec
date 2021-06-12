@@ -1,17 +1,14 @@
-Name:      rasa-focuser-client
-Version:   2.0.1
+Name:      observatory-focuslynx-client
+Version:   20210612
 Release:   0
-Url:       https://github.com/warwick-one-metre/rasa-focusd
-Summary:   Focuser control client for the RASA prototype telescope.
+Url:       https://github.com/warwick-one-metre/focuslynxd
+Summary:   Optec FocusLynx control client.
 License:   GPL-3.0
 Group:     Unspecified
 BuildArch: noarch
-Requires:  python3, python3-Pyro4, python3-warwick-observatory-common, python3-warwick-rasa-focuser
+Requires:  python3, python3-Pyro4, python3-warwick-observatory-common, python3-warwick-observatory-focuslynx
 
 %description
-Part of the observatory software for the RASA prototype telescope.
-
-focus is a commandline utility for controlling the focusers.
 
 %build
 mkdir -p %{buildroot}%{_bindir}

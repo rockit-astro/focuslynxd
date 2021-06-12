@@ -1,75 +1,73 @@
 #!/usr/bin/env python3.6
 #
-# This file is part of rasa-focusd.
+# This file is part of focuslynxd.
 #
-# rasa-focusd is free software: you can redistribute it and/or modify
+# focuslynxd is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
-# rasa-focusd is distributed in the hope that it will be useful,
+# focuslynxd is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with rasa-focusd.  If not, see <http://www.gnu.org/licenses/>.
+# along with focuslynxd.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Commandline client for controlling an Optec Focus Lynx focuser focusd"""
-# pylint: disable=unused-argument
+"""Commandline client for controlling an Optec Focus Lynx focuser"""
 
 import datetime
+import glob
 import json
 import os
 import sys
 import Pyro4
-from warwick.observatory.common import daemons
-from warwick.rasa.focuser import CommandStatus, FocuserStatus
+from warwick.observatory.common import TFmt
+from warwick.observatory.focuslynx import Config, CommandStatus, FocuserStatus
 
-# Set automatically when generating RPM package
-SOFTWARE_VERSION = 'UNKNOWN'
-DAEMON = daemons.rasa_focus
 
 SCRIPT_NAME = os.path.basename(sys.argv[0])
 sys.excepthook = Pyro4.util.excepthook
-
-FMT_GREEN = u'\033[92m'
-FMT_RED = u'\033[91m'
-FMT_CYAN = u'\033[96m'
-FMT_YELLOW = u'\033[93m'
-FMT_BOLD = u'\033[1m'
-FMT_CLEAR = u'\033[0m'
 
 CHANNELS = [1, 2]
 CHANNELS_ARG_STRING = '1|2'
 
 
-def run_command(command, daemon, args):
-    """Runs a command and prints the message associated with the return code.
-       Returns the return code from the command
-    """
+def run_command(command, args):
+    """Runs a daemon command, handling error messages"""
+    if 'FOCUSD_CONFIG_PATH' in os.environ:
+        config = Config(os.environ['FOCUSD_CONFIG_PATH'])
+    else:
+        # Load the config file defined in the PIPELINED_CONFIG_PATH environment variable or from the
+        # default system location (/etc/pipelined/). Exit with an error if zero or multiple are found.
+        files = glob.glob("/etc/focusd/*.json")
+        if len(files) != 1:
+            print('error: failed to guess the default config file. ' +
+                  'Run as FOCUSD_CONFIG_PATH=/path/to/config.json pipeline <command>')
+            return 1
+
+        config = Config(files[0])
+
     try:
-        ret = command(daemon, args)
-    except KeyboardInterrupt:
-        ret = -100
+        ret = command(config, args)
     except Pyro4.errors.CommunicationError:
         ret = -101
 
     # Print message associated with error codes, except for -1 (error handled locally)
     if ret not in [-1, 0]:
         print(CommandStatus.message(ret))
+    sys.exit(ret)
 
-    return ret
 
-
-def print_status(daemon, args):
+def print_status(config, _):
     """Prints a human-readable summary of the focuser status"""
-    with daemon.connect() as focusd:
+    with config.daemon.connect() as focusd:
         data = focusd.report_status()
 
     if data is not None:
         date = datetime.datetime.strptime(data['date'], '%Y-%m-%dT%H:%M:%SZ')
-        print('Data received ' + FMT_BOLD + str(date) + FMT_CLEAR + ':')
+        print('Data received ' + TFmt.Bold + str(date) + TFmt.Clear + ':')
         for i in [0, 1]:
             channel = data['channels'][i]
             label = 'Channel {}: '.format(i+1)
@@ -77,26 +75,26 @@ def print_status(daemon, args):
                 print(label + FocuserStatus.label(channel['status'], True))
                 continue
 
-            label += FMT_BOLD + (FMT_YELLOW if channel['status'] == FocuserStatus.Moving else '')
-            label += '{:+7d}'.format(channel['current_steps']) + FMT_CLEAR + ' steps'
+            label += TFmt.Bold + (TFmt.Yellow if channel['status'] == FocuserStatus.Moving else '')
+            label += '{:+7d}'.format(channel['current_steps']) + TFmt.Clear + ' steps'
             if channel['status'] == FocuserStatus.Moving:
-                label += ' (moving to ' + FMT_BOLD + '{:+7d}'.format(channel['target_steps'])
-                label += FMT_CLEAR + ' steps)'
+                label += ' (moving to ' + TFmt.Bold + '{:+7d}'.format(channel['target_steps'])
+                label += TFmt.Clear + ' steps)'
 
-            label += FMT_BOLD + ', {:.1f}'.format(channel['temperature']) + FMT_CLEAR + '\u00B0C'
+            label += TFmt.Bold + ', {:.1f}'.format(channel['temperature']) + TFmt.Clear + '\u00B0C'
             print(label)
     return 0
 
 
-def print_json(daemon, args):
+def print_json(config, _):
     """Prints a machine-readable summary of the focuser status"""
-    with daemon.connect() as focusd:
+    with config.daemon.connect() as focusd:
         print(json.dumps(focusd.report_status() or {}))
 
     return 0
 
 
-def set_position(daemon, args):
+def set_position(config, args):
     """Request a focuser channel to move a specific step position"""
     try:
         if len(args) == 2 and int(args[0]) in CHANNELS:
@@ -104,11 +102,11 @@ def set_position(daemon, args):
             position = int(args[1])
 
             try:
-                with daemon.connect(timeout=0) as focusd:
+                with config.daemon.connect(timeout=0) as focusd:
                     return focusd.set_focus(channel, position)
             except KeyboardInterrupt:
                 # ctrl-c terminates the running command
-                with daemon.connect() as focusd:
+                with config.daemon.connect() as focusd:
                     return focusd.stop_channel(channel)
     except ValueError:
         pass
@@ -116,7 +114,7 @@ def set_position(daemon, args):
     return -1
 
 
-def offset_position(daemon, args):
+def offset_position(config, args):
     """Request a focuser channel to move by a specific step delta"""
     try:
         if len(args) == 2 and int(args[0]) in CHANNELS:
@@ -124,11 +122,11 @@ def offset_position(daemon, args):
             delta = int(args[1])
 
             try:
-                with daemon.connect(timeout=0) as focusd:
+                with config.daemon.connect(timeout=0) as focusd:
                     return focusd.set_focus(channel, delta, offset=True)
             except KeyboardInterrupt:
                 # ctrl-c terminates the running command
-                with daemon.connect() as focusd:
+                with config.daemon.connect() as focusd:
                     return focusd.stop_channel(channel)
     except ValueError:
         pass
@@ -136,11 +134,11 @@ def offset_position(daemon, args):
     return -1
 
 
-def stop(daemon, args):
+def stop(config, args):
     """Stop a focuser channel"""
     try:
         if len(args) == 1 and int(args[0]) in CHANNELS:
-            with daemon.connect() as focusd:
+            with config.daemon.connect() as focusd:
                 return focusd.stop_channel(int(args[0]))
     except ValueError:
         pass
@@ -149,11 +147,11 @@ def stop(daemon, args):
     return -1
 
 
-def set_home_position(daemon, args):
+def set_home_position(config, args):
     """Sets the current focuser position to the home position"""
     try:
         if len(args) == 1 and int(args[0]) in CHANNELS:
-            with daemon.connect() as focusd:
+            with config.daemon.connect() as focusd:
                 return focusd.reset_home_position(int(args[0]))
     except ValueError:
         pass
@@ -162,15 +160,15 @@ def set_home_position(daemon, args):
     return -1
 
 
-def initialize(daemon, rgs):
+def initialize(config, _):
     """Connect to the focuser"""
-    with daemon.connect() as focusd:
+    with config.daemon.connect() as focusd:
         return focusd.initialize()
 
 
-def shutdown(daemon, args):
+def shutdown(config, _):
     """Disconnect from the focuser"""
-    with daemon.connect() as focusd:
+    with config.daemon.connect() as focusd:
         return focusd.shutdown()
 
 
@@ -194,9 +192,6 @@ def print_usage():
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        sys.exit(print_usage())
-
     commands = {
         'set': set_position,
         'offset': offset_position,
@@ -208,7 +203,7 @@ if __name__ == '__main__':
         'kill': shutdown
     }
 
-    if sys.argv[1] not in commands:
-        sys.exit(print_usage())
+    if len(sys.argv) >= 2 and sys.argv[1] in commands:
+        sys.exit(run_command(commands[sys.argv[1]], sys.argv[2:]))
 
-    sys.exit(run_command(commands[sys.argv[1]], DAEMON, sys.argv[2:]))
+    sys.exit(print_usage())
