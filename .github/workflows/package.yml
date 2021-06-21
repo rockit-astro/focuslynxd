@@ -32,6 +32,7 @@ jobs:
           centos-packages/set-spec-release.sh observatory-focuslynx-server.spec
           centos-packages/set-spec-release.sh observatory-focuslynx-client.spec
           centos-packages/set-spec-release.sh python3-warwick-observatory-focuslynx.spec
+          centos-packages/set-spec-release.sh clasp-focuslynx-data.spec
       - name: Package RPMs
         run:
           make

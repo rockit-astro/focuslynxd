@@ -14,6 +14,7 @@ all:
 	${RPMBUILD} -ba observatory-focuslynx-server.spec
 	${RPMBUILD} -ba observatory-focuslynx-client.spec
 	${RPMBUILD} -ba python3-warwick-observatory-focuslynx.spec
+	${RPMBUILD} -ba clasp-focuslynx-data.spec
 	mv build/noarch/*.rpm .
 	rm -rf build
 	mv focusd.bak focusd

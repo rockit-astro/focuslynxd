@@ -46,8 +46,9 @@ The automated packaging scripts will push 4 RPM packages to the observatory pack
 | observatory-focuslynx-server | Contains the `focusd` server and systemd service file. |
 | observatory-focuslynx-client | Contains the `focus` commandline utility for controlling the focuser server. |
 | python3-warwick-observatory-focuslynx | Contains the python module with shared code. |
+| clasp-focuslynx-data | Contains the json configuration for the CLASP telescope. |
 
-TODO: Add CLASP config
+`obsevatory-focuslynx-server` and `observatory-focuslynx-client` and `clasp-focuslynx-data` should be installed on the `clasp-tcs` machine.
 
 After installing packages, the systemd service should be enabled:
 
