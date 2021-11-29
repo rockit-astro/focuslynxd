@@ -1,5 +1,5 @@
 Name:      observatory-focuslynx-server
-Version:   20210612
+Version:   20211126
 Release:   0
 Url:       https://github.com/warwick-one-metre/focuslynxd
 Summary:   Focuser control server for Optec Focus Lynx hardware.

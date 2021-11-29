@@ -376,11 +376,16 @@ class FocusLynxDaemon:
     def report_status(self):
         """Returns a dictionary containing the current focuser state"""
         with self._status_lock:
-            return {
+            status = {
                 'date': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'software_version': SOFTWARE_VERSION,
-                'channels': self._channel_status
             }
+
+            for i, c in enumerate(self._channel_status):
+                for k, v in c.items():
+                    status[k + '_' + str(i+1)] = v
+
+            return status
 
     @Pyro4.expose
     def set_focus(self, channel, steps, offset=False):

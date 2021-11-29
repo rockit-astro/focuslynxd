@@ -1,5 +1,5 @@
 Name:      observatory-focuslynx-client
-Version:   20210612
+Version:   20211126
 Release:   0
 Url:       https://github.com/warwick-one-metre/focuslynxd
 Summary:   Optec FocusLynx control client.

@@ -68,20 +68,23 @@ def print_status(config, _):
     if data is not None:
         date = datetime.datetime.strptime(data['date'], '%Y-%m-%dT%H:%M:%SZ')
         print('Data received ' + TFmt.Bold + str(date) + TFmt.Clear + ':')
-        for i in [0, 1]:
-            channel = data['channels'][i]
-            label = 'Channel {}: '.format(i+1)
-            if channel['status'] < FocuserStatus.Idle:
-                print(label + FocuserStatus.label(channel['status'], True))
+        for i in CHANNELS:
+            label = 'Channel {}: '.format(i)
+            channel_status = data['status_' + str(i)]
+            channel_steps = data['current_steps_' + str(i)]
+            channel_target = data['target_steps_' + str(i)]
+            channel_temperature = data['temperature_' + str(i)]
+            if channel_status < FocuserStatus.Idle:
+                print(label + FocuserStatus.label(channel_status, True))
                 continue
 
-            label += TFmt.Bold + (TFmt.Yellow if channel['status'] == FocuserStatus.Moving else '')
-            label += '{:+7d}'.format(channel['current_steps']) + TFmt.Clear + ' steps'
-            if channel['status'] == FocuserStatus.Moving:
-                label += ' (moving to ' + TFmt.Bold + '{:+7d}'.format(channel['target_steps'])
+            label += TFmt.Bold + (TFmt.Yellow if channel_status == FocuserStatus.Moving else '')
+            label += '{:+7d}'.format(channel_steps) + TFmt.Clear + ' steps'
+            if channel_status == FocuserStatus.Moving:
+                label += ' (moving to ' + TFmt.Bold + '{:+7d}'.format(channel_target)
                 label += TFmt.Clear + ' steps)'
 
-            label += TFmt.Bold + ', {:.1f}'.format(channel['temperature']) + TFmt.Clear + '\u00B0C'
+            label += TFmt.Bold + ', {:.1f}'.format(channel_temperature) + TFmt.Clear + '\u00B0C'
             print(label)
     return 0
 
