@@ -1,12 +1,12 @@
 Name:      observatory-focuslynx-server
-Version:   20211126
+Version:   20220727
 Release:   0
 Url:       https://github.com/warwick-one-metre/focuslynxd
 Summary:   Focuser control server for Optec Focus Lynx hardware.
 License:   GPL-3.0
 Group:     Unspecified
 BuildArch: noarch
-Requires:  python3, python3-Pyro4, python3-pyserial, python3-warwick-observatory-common, python3-warwick-observatory-focuslynx, %{?systemd_requires}
+Requires:  python3 python3-Pyro4 python3-pyserial python3-warwick-observatory-common python3-warwick-observatory-focuslynx
 
 %description
 
